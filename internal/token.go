@@ -5,6 +5,7 @@
 package internal
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -72,6 +73,20 @@ func (e *tokenJSON) expiry() (t time.Time) {
 	return
 }
 
+// mixinDataJSON is the struct representing the HTTP response from Mixin OAuth2
+// providers returning a token in JSON form.
+type mixinDataJSON struct {
+	Data struct {
+		AccessToken string `json:"access_token"`
+		Scope       string `json:"scope"`
+	} `json:"data"`
+}
+
+// Default expiry time of mixin token is one year
+func (e *mixinDataJSON) expiry() (t time.Time) {
+	return time.Now().Add(365 * 24 * time.Hour)
+}
+
 type expirationTime int32
 
 func (e *expirationTime) UnmarshalJSON(b []byte) error {
@@ -109,6 +124,7 @@ const (
 	AuthStyleUnknown  AuthStyle = 0
 	AuthStyleInParams AuthStyle = 1
 	AuthStyleInHeader AuthStyle = 2
+	AuthStyleMixin    AuthStyle = 3
 )
 
 // authStyleCache is the set of tokenURLs we've successfully used via
@@ -177,6 +193,23 @@ func newTokenRequest(tokenURL, clientID, clientSecret string, v url.Values, auth
 	return req, nil
 }
 
+func newMixinTokenRequest(tokenURL, clientID, clientSecret string, v url.Values) (*http.Request, error) {
+	code := v.Get("code")
+	body := map[string]string{
+		"code":          code,
+		"client_id":     clientID,
+		"client_secret": clientSecret,
+	}
+
+	data, _ := json.Marshal(body)
+	req, err := http.NewRequest("POST", tokenURL, bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	return req, nil
+}
+
 func cloneURLValues(v url.Values) url.Values {
 	v2 := make(url.Values, len(v))
 	for k, vv := range v {
@@ -195,6 +228,15 @@ func RetrieveToken(ctx context.Context, clientID, clientSecret, tokenURL string,
 			authStyle = AuthStyleInHeader // the first way we'll try
 		}
 	}
+
+	if authStyle == AuthStyleMixin {
+		req, err := newMixinTokenRequest(tokenURL, clientID, clientSecret, v)
+		if err != nil {
+			return nil, err
+		}
+		return doMixinTokenRoundTrip(ctx, req)
+	}
+
 	req, err := newTokenRequest(tokenURL, clientID, clientSecret, v, authStyle)
 	if err != nil {
 		return nil, err
@@ -281,6 +323,41 @@ func doTokenRoundTrip(ctx context.Context, req *http.Request) (*Token, error) {
 	if token.AccessToken == "" {
 		return nil, errors.New("oauth2: server response missing access_token")
 	}
+	return token, nil
+}
+
+func doMixinTokenRoundTrip(ctx context.Context, req *http.Request) (*Token, error) {
+	r, err := ctxhttp.Do(ctx, ContextClient(ctx), req)
+	if err != nil {
+		return nil, err
+	}
+	body, err := ioutil.ReadAll(io.LimitReader(r.Body, 1<<20))
+	r.Body.Close()
+	if err != nil {
+		return nil, fmt.Errorf("oauth2: cannot fetch token: %v", err)
+	}
+	if code := r.StatusCode; code < 200 || code > 299 {
+		return nil, &RetrieveError{
+			Response: r,
+			Body:     body,
+		}
+	}
+
+	var token *Token
+	var dj mixinDataJSON
+	if err = json.Unmarshal(body, &dj); err != nil {
+		return nil, err
+	}
+	token = &Token{
+		AccessToken: dj.Data.AccessToken,
+		Expiry:      dj.expiry(),
+		Raw:         make(map[string]interface{}),
+	}
+	json.Unmarshal(body, &token.Raw) // no error checks for optional fields
+	if token.AccessToken == "" {
+		return nil, errors.New("oauth2: server response missing access_token")
+	}
+
 	return token, nil
 }
 
