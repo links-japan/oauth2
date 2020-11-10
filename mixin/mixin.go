@@ -16,3 +16,9 @@ var BackUpEndpoint = oauth2.Endpoint{
 	TokenURL: "https://mixin-api.zeromesh.net/oauth/token",
 	AuthStyle: oauth2.AuthStyleMixin,
 }
+
+var LinksEndpoint = oauth2.Endpoint{
+	AuthURL:  "https://oauth.getlinks.jp",
+	TokenURL: "https://api.mixin.one/oauth/token",
+	AuthStyle: oauth2.AuthStyleMixin,
+}
